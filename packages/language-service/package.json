@@ -27,7 +27,7 @@
 		"path-browserify": "^1.0.1",
 		"volar-service-css": "0.0.38",
 		"volar-service-emmet": "0.0.38",
-		"volar-service-html": "0.0.38",
+		"volar-service-html": "0.0.40",
 		"volar-service-json": "0.0.38",
 		"volar-service-pug": "0.0.38",
 		"volar-service-pug-beautify": "0.0.38",
