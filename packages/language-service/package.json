@@ -25,7 +25,7 @@
 		"@vue/typescript-plugin": "2.0.13",
 		"computeds": "^0.0.1",
 		"path-browserify": "^1.0.1",
-		"volar-service-css": "0.0.38",
+		"volar-service-css": "0.0.40",
 		"volar-service-emmet": "0.0.38",
 		"volar-service-html": "0.0.38",
 		"volar-service-json": "0.0.38",
