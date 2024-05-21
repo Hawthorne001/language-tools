@@ -20,7 +20,7 @@
 		"@volar/language-service": "2.2.0-alpha.9",
 		"@volar/typescript": "2.2.0-alpha.9",
 		"@vue/compiler-dom": "^3.4.0",
-		"@vue/language-core": "2.0.13",
+		"@vue/language-core": "2.0.15",
 		"@vue/shared": "^3.4.0",
 		"@vue/typescript-plugin": "2.0.13",
 		"computeds": "^0.0.1",
