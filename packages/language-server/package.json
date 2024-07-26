@@ -17,8 +17,8 @@
 	"dependencies": {
 		"@volar/language-core": "2.2.0-alpha.9",
 		"@volar/language-server": "2.2.0-alpha.9",
-		"@vue/language-core": "2.0.13",
-		"@vue/language-service": "2.0.13",
+		"@vue/language-core": "2.0.29",
+		"@vue/language-service": "2.0.29",
 		"@vue/typescript-plugin": "2.0.13",
 		"vscode-languageserver-protocol": "^3.17.5"
 	}
