@@ -1,16 +1,17 @@
-import type { ServiceContext, VirtualCode } from '@volar/language-service';
+import type { LanguageServiceContext, ProviderResult, VirtualCode } from '@volar/language-service';
 import type { CompilerDOM } from '@vue/language-core';
 import * as vue from '@vue/language-core';
-import { VueGeneratedCode, hyphenateAttr, hyphenateTag } from '@vue/language-core';
-import { computed } from 'computeds';
+import { hyphenateAttr, hyphenateTag, VueVirtualCode } from '@vue/language-core';
+import { Computed, computed } from 'alien-signals';
 import type * as vscode from 'vscode-languageserver-protocol';
+import type { URI } from 'vscode-uri';
 import { AttrNameCasing, TagNameCasing } from '../types';
 
 export async function convertTagName(
-	context: ServiceContext,
-	uri: string,
+	context: LanguageServiceContext,
+	uri: URI,
 	casing: TagNameCasing,
-	tsPluginClient: typeof import('@vue/typescript-plugin/lib/client') | undefined,
+	tsPluginClient: typeof import('@vue/typescript-plugin/lib/client') | undefined
 ) {
 
 	const sourceFile = context.language.scripts.get(uri);
@@ -19,11 +20,11 @@ export async function convertTagName(
 	}
 
 	const rootCode = sourceFile?.generated?.root;
-	if (!(rootCode instanceof VueGeneratedCode)) {
+	if (!(rootCode instanceof VueVirtualCode)) {
 		return;
 	}
 
-	const desc = rootCode.sfc;
+	const desc = rootCode._sfc;
 	if (!desc.template) {
 		return;
 	}
@@ -55,10 +56,10 @@ export async function convertTagName(
 }
 
 export async function convertAttrName(
-	context: ServiceContext,
-	uri: string,
+	context: LanguageServiceContext,
+	uri: URI,
 	casing: AttrNameCasing,
-	tsPluginClient?: typeof import('@vue/typescript-plugin/lib/client'),
+	tsPluginClient?: typeof import('@vue/typescript-plugin/lib/client')
 ) {
 
 	const sourceFile = context.language.scripts.get(uri);
@@ -67,11 +68,11 @@ export async function convertAttrName(
 	}
 
 	const rootCode = sourceFile?.generated?.root;
-	if (!(rootCode instanceof VueGeneratedCode)) {
+	if (!(rootCode instanceof VueVirtualCode)) {
 		return;
 	}
 
-	const desc = rootCode.sfc;
+	const desc = rootCode._sfc;
 	if (!desc.template) {
 		return;
 	}
@@ -85,7 +86,7 @@ export async function convertAttrName(
 	for (const [tagName, { attrs }] of tags) {
 		const componentName = components.find(component => component === tagName || hyphenateTag(component) === tagName);
 		if (componentName) {
-			const props = await tsPluginClient?.getComponentProps(rootCode.fileName, componentName) ?? [];
+			const props = (await tsPluginClient?.getComponentProps(rootCode.fileName, componentName) ?? []).map(prop => prop.name);
 			for (const [attrName, { offsets }] of attrs) {
 				const propName = props.find(prop => prop === attrName || hyphenateAttr(prop) === attrName);
 				if (propName) {
@@ -108,16 +109,12 @@ export async function convertAttrName(
 	return edits;
 }
 
-export async function getNameCasing(
-	context: ServiceContext,
-	uri: string,
-	tsPluginClient?: typeof import('@vue/typescript-plugin/lib/client'),
-) {
+export async function getNameCasing(context: LanguageServiceContext, uri: URI) {
 
-	const detected = await detect(context, uri, tsPluginClient);
+	const detected = await detect(context, uri);
 	const [attr, tag] = await Promise.all([
-		context.env.getConfiguration?.<'autoKebab' | 'autoCamel' | 'kebab' | 'camel'>('vue.complete.casing.props', uri),
-		context.env.getConfiguration?.<'autoKebab' | 'autoPascal' | 'kebab' | 'pascal'>('vue.complete.casing.tags', uri),
+		context.env.getConfiguration?.<'autoKebab' | 'autoCamel' | 'kebab' | 'camel'>('vue.complete.casing.props', uri.toString()),
+		context.env.getConfiguration?.<'autoKebab' | 'autoPascal' | 'kebab' | 'pascal'>('vue.complete.casing.tags', uri.toString()),
 	]);
 	const tagNameCasing = detected.tag.length === 1 && (tag === 'autoPascal' || tag === 'autoKebab') ? detected.tag[0] : (tag === 'autoKebab' || tag === 'kebab') ? TagNameCasing.Kebab : TagNameCasing.Pascal;
 	const attrNameCasing = detected.attr.length === 1 && (attr === 'autoCamel' || attr === 'autoKebab') ? detected.attr[0] : (attr === 'autoCamel' || attr === 'camel') ? AttrNameCasing.Camel : AttrNameCasing.Kebab;
@@ -129,16 +126,15 @@ export async function getNameCasing(
 }
 
 export async function detect(
-	context: ServiceContext,
-	uri: string,
-	tsPluginClient?: typeof import('@vue/typescript-plugin/lib/client'),
+	context: LanguageServiceContext,
+	uri: URI
 ): Promise<{
 	tag: TagNameCasing[],
 	attr: AttrNameCasing[],
 }> {
 
 	const rootFile = context.language.scripts.get(uri)?.generated?.root;
-	if (!(rootFile instanceof VueGeneratedCode)) {
+	if (!(rootFile instanceof VueVirtualCode)) {
 		return {
 			tag: [],
 			attr: [],
@@ -174,41 +170,27 @@ export async function detect(
 
 		return result;
 	}
-	async function getTagNameCase(file: VueGeneratedCode): Promise<TagNameCasing[]> {
+	function getTagNameCase(file: VueVirtualCode): ProviderResult<TagNameCasing[]> {
 
-		const components = await tsPluginClient?.getComponentNames(file.fileName) ?? [];
-		const tagNames = getTemplateTagsAndAttrs(file);
-		const result: TagNameCasing[] = [];
+		const result = new Set<TagNameCasing>();
 
-		let anyComponentUsed = false;
-
-		for (const component of components) {
-			if (tagNames.has(component) || tagNames.has(hyphenateTag(component))) {
-				anyComponentUsed = true;
-				break;
-			}
-		}
-		if (!anyComponentUsed) {
-			return []; // not sure component style, because do not have any component using in <template> for check
-		}
-
-		for (const [tagName] of tagNames) {
-			// TagName
-			if (tagName !== hyphenateTag(tagName)) {
-				result.push(TagNameCasing.Pascal);
-				break;
-			}
-		}
-		for (const component of components) {
-			// Tagname -> tagname
-			// TagName -> tag-name
-			if (component !== hyphenateTag(component) && tagNames.has(hyphenateTag(component))) {
-				result.push(TagNameCasing.Kebab);
-				break;
+		if (file._sfc.template?.ast) {
+			for (const element of vue.forEachElementNode(file._sfc.template.ast)) {
+				if (element.tagType === 1 satisfies CompilerDOM.ElementTypes) {
+					if (element.tag !== hyphenateTag(element.tag)) {
+						// TagName
+						result.add(TagNameCasing.Pascal);
+					}
+					else {
+						// Tagname -> tagname
+						// TagName -> tag-name
+						result.add(TagNameCasing.Kebab);
+					}
+				}
 			}
 		}
 
-		return result;
+		return [...result];
 	}
 }
 
@@ -219,16 +201,16 @@ type Tags = Map<string, {
 	}>,
 }>;
 
-const map = new WeakMap<VirtualCode, () => Tags | undefined>();
+const map = new WeakMap<VirtualCode, Computed<Tags | undefined>>();
 
 function getTemplateTagsAndAttrs(sourceFile: VirtualCode): Tags {
 
 	if (!map.has(sourceFile)) {
 		const getter = computed(() => {
-			if (!(sourceFile instanceof vue.VueGeneratedCode)) {
+			if (!(sourceFile instanceof vue.VueVirtualCode)) {
 				return;
 			}
-			const ast = sourceFile.sfc.template?.ast;
+			const ast = sourceFile._sfc.template?.ast;
 			const tags: Tags = new Map();
 			if (ast) {
 				for (const node of vue.forEachElementNode(ast)) {
@@ -280,5 +262,5 @@ function getTemplateTagsAndAttrs(sourceFile: VirtualCode): Tags {
 		map.set(sourceFile, getter);
 	}
 
-	return map.get(sourceFile)!() ?? new Map();
+	return map.get(sourceFile)!.get() ?? new Map();
 }

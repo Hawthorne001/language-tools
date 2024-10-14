@@ -1,6 +1,9 @@
+import { camelize } from '@vue/shared';
 import type * as ts from 'typescript';
-import * as path from 'path-browserify';
+import { posix as path } from 'path-browserify';
 import type { RawVueCompilerOptions, VueCompilerOptions, VueLanguagePlugin } from '../types';
+import { getAllExtensions } from '../languagePlugin';
+import { generateGlobalTypes } from '../codegen/globalTypes';
 
 export type ParsedCommandLine = ts.ParsedCommandLine & {
 	vueOptions: VueCompilerOptions;
@@ -8,10 +11,13 @@ export type ParsedCommandLine = ts.ParsedCommandLine & {
 
 export function createParsedCommandLineByJson(
 	ts: typeof import('typescript'),
-	parseConfigHost: ts.ParseConfigHost,
+	parseConfigHost: ts.ParseConfigHost & {
+		writeFile?(path: string, data: string): void;
+	},
 	rootDir: string,
 	json: any,
-	configFileName = rootDir + '/jsconfig.json'
+	configFileName = rootDir + '/jsconfig.json',
+	skipGlobalTypesSetup = false
 ): ParsedCommandLine {
 
 	const proxyHost = proxyParseConfigHostForExtendConfigPaths(parseConfigHost);
@@ -29,6 +35,12 @@ export function createParsedCommandLineByJson(
 	}
 
 	const resolvedVueOptions = resolveVueCompilerOptions(vueOptions);
+	if (skipGlobalTypesSetup) {
+		resolvedVueOptions.__setupedGlobalTypes = true;
+	}
+	else {
+		resolvedVueOptions.__setupedGlobalTypes = setupGlobalTypes(rootDir, resolvedVueOptions, parseConfigHost);
+	}
 	const parsed = ts.parseJsonConfigFileContent(
 		json,
 		proxyHost.host,
@@ -36,11 +48,12 @@ export function createParsedCommandLineByJson(
 		{},
 		configFileName,
 		undefined,
-		resolvedVueOptions.extensions.map(extension => ({
-			extension: extension.slice(1),
-			isMixedContent: true,
-			scriptKind: ts.ScriptKind.Deferred,
-		})),
+		getAllExtensions(resolvedVueOptions)
+			.map(extension => ({
+				extension: extension.slice(1),
+				isMixedContent: true,
+				scriptKind: ts.ScriptKind.Deferred,
+			}))
 	);
 
 	// fix https://github.com/vuejs/language-tools/issues/1786
@@ -58,6 +71,7 @@ export function createParsedCommandLine(
 	ts: typeof import('typescript'),
 	parseConfigHost: ts.ParseConfigHost,
 	tsConfigPath: string,
+	skipGlobalTypesSetup = false
 ): ParsedCommandLine {
 	try {
 		const proxyHost = proxyParseConfigHostForExtendConfigPaths(parseConfigHost);
@@ -76,6 +90,12 @@ export function createParsedCommandLine(
 		}
 
 		const resolvedVueOptions = resolveVueCompilerOptions(vueOptions);
+		if (skipGlobalTypesSetup) {
+			resolvedVueOptions.__setupedGlobalTypes = true;
+		}
+		else {
+			resolvedVueOptions.__setupedGlobalTypes = setupGlobalTypes(path.dirname(tsConfigPath), resolvedVueOptions, parseConfigHost);
+		}
 		const parsed = ts.parseJsonSourceFileConfigFileContent(
 			config,
 			proxyHost.host,
@@ -83,11 +103,12 @@ export function createParsedCommandLine(
 			{},
 			tsConfigPath,
 			undefined,
-			resolvedVueOptions.extensions.map(extension => ({
-				extension: extension.slice(1),
-				isMixedContent: true,
-				scriptKind: ts.ScriptKind.Deferred,
-			})),
+			getAllExtensions(resolvedVueOptions)
+				.map(extension => ({
+					extension: extension.slice(1),
+					isMixedContent: true,
+					scriptKind: ts.ScriptKind.Deferred,
+				}))
 		);
 
 		// fix https://github.com/vuejs/language-tools/issues/1786
@@ -134,7 +155,7 @@ function proxyParseConfigHostForExtendConfigPaths(parseConfigHost: ts.ParseConfi
 
 function getPartialVueCompilerOptions(
 	ts: typeof import('typescript'),
-	tsConfigSourceFile: ts.TsConfigSourceFile,
+	tsConfigSourceFile: ts.TsConfigSourceFile
 ): Partial<VueCompilerOptions> {
 
 	const folder = path.dirname(tsConfigSourceFile.fileName);
@@ -161,7 +182,7 @@ function getPartialVueCompilerOptions(
 	}
 	if (rawOptions.plugins) {
 		const plugins = rawOptions.plugins
-			.map<VueLanguagePlugin[] | VueLanguagePlugin>((pluginPath: string) => {
+			.map<VueLanguagePlugin>((pluginPath: string) => {
 				try {
 					const resolvedPath = resolvePath(pluginPath);
 					if (resolvedPath) {
@@ -177,8 +198,7 @@ function getPartialVueCompilerOptions(
 					console.warn('[Vue] Resolve plugin path failed:', pluginPath, error);
 				}
 				return [];
-			})
-			.flat(Infinity as 1);
+			});
 
 		result.plugins = plugins;
 	}
@@ -200,56 +220,26 @@ function getPartialVueCompilerOptions(
 	}
 }
 
-// https://developer.mozilla.org/en-US/docs/Web/HTML/Element
-const HTML_TAGS =
-	'html,body,base,head,link,meta,style,title,address,article,aside,footer,' +
-	'header,hgroup,h1,h2,h3,h4,h5,h6,nav,section,search,div,dd,dl,dt,figcaption,' +
-	'figure,picture,hr,img,li,main,ol,p,pre,ul,a,b,abbr,bdi,bdo,br,cite,code,' +
-	'data,dfn,em,i,kbd,mark,q,rp,rt,ruby,s,samp,small,span,strong,sub,sup,' +
-	'time,u,var,wbr,area,audio,map,track,video,embed,object,param,source,' +
-	'canvas,script,noscript,del,ins,caption,col,colgroup,table,thead,tbody,td,' +
-	'th,tr,button,datalist,fieldset,form,input,label,legend,meter,optgroup,' +
-	'option,output,progress,select,textarea,details,dialog,menu,' +
-	'summary,template,blockquote,iframe,tfoot';
-
-// https://developer.mozilla.org/en-US/docs/Web/SVG/Element
-const SVG_TAGS =
-	'svg,animate,animateMotion,animateTransform,circle,clipPath,color-profile,' +
-	'defs,desc,discard,ellipse,feBlend,feColorMatrix,feComponentTransfer,' +
-	'feComposite,feConvolveMatrix,feDiffuseLighting,feDisplacementMap,' +
-	'feDistanceLight,feDropShadow,feFlood,feFuncA,feFuncB,feFuncG,feFuncR,' +
-	'feGaussianBlur,feImage,feMerge,feMergeNode,feMorphology,feOffset,' +
-	'fePointLight,feSpecularLighting,feSpotLight,feTile,feTurbulence,filter,' +
-	'foreignObject,g,hatch,hatchpath,image,line,linearGradient,marker,mask,' +
-	'mesh,meshgradient,meshpatch,meshrow,metadata,mpath,path,pattern,' +
-	'polygon,polyline,radialGradient,rect,set,solidcolor,stop,switch,symbol,' +
-	'text,textPath,title,tspan,unknown,use,view';
-
 export function resolveVueCompilerOptions(vueOptions: Partial<VueCompilerOptions>): VueCompilerOptions {
 	const target = vueOptions.target ?? 3.3;
-	const lib = vueOptions.lib || (target < 2.7 ? '@vue/runtime-dom' : 'vue');
+	const lib = vueOptions.lib ?? 'vue';
 	return {
 		...vueOptions,
 		target,
 		extensions: vueOptions.extensions ?? ['.vue'],
+		vitePressExtensions: vueOptions.vitePressExtensions ?? [],
+		petiteVueExtensions: vueOptions.petiteVueExtensions ?? [],
 		lib,
 		jsxSlots: vueOptions.jsxSlots ?? false,
 		strictTemplates: vueOptions.strictTemplates ?? false,
 		skipTemplateCodegen: vueOptions.skipTemplateCodegen ?? false,
-		nativeTags: vueOptions.nativeTags ?? [...new Set([
-			...HTML_TAGS.split(','),
-			...SVG_TAGS.split(','),
-			// fix https://github.com/johnsoncodehk/volar/issues/1340
-			'hgroup',
-			'slot',
-			'component',
-		])],
+		fallthroughAttributes: vueOptions.fallthroughAttributes ?? false,
 		dataAttributes: vueOptions.dataAttributes ?? [],
 		htmlAttributes: vueOptions.htmlAttributes ?? ['aria-*'],
 		optionsWrapper: vueOptions.optionsWrapper ?? (
 			target >= 2.7
 				? [`(await import('${lib}')).defineComponent(`, `)`]
-				: [`(await import('vue')).default.extend(`, `)`]
+				: [`(await import('${lib}')).default.extend(`, `)`]
 		),
 		macros: {
 			defineProps: ['defineProps'],
@@ -261,6 +251,11 @@ export function resolveVueCompilerOptions(vueOptions: Partial<VueCompilerOptions
 			withDefaults: ['withDefaults'],
 			...vueOptions.macros,
 		},
+		composibles: {
+			useCssModule: ['useCssModule'],
+			useTemplateRef: ['useTemplateRef', 'templateRef'],
+			...vueOptions.composibles,
+		},
 		plugins: vueOptions.plugins ?? [],
 
 		// experimental
@@ -268,16 +263,42 @@ export function resolveVueCompilerOptions(vueOptions: Partial<VueCompilerOptions
 		experimentalResolveStyleCssClasses: vueOptions.experimentalResolveStyleCssClasses ?? 'scoped',
 		// https://github.com/vuejs/vue-next/blob/master/packages/compiler-dom/src/transforms/vModel.ts#L49-L51
 		// https://vuejs.org/guide/essentials/forms.html#form-input-bindings
-		experimentalModelPropName: vueOptions.experimentalModelPropName ?? {
-			'': {
-				input: true
-			},
-			value: {
-				input: { type: 'text' },
-				textarea: true,
-				select: true
+		experimentalModelPropName: Object.fromEntries(Object.entries(
+			vueOptions.experimentalModelPropName ?? {
+				'': {
+					input: true
+				},
+				value: {
+					input: { type: 'text' },
+					textarea: true,
+					select: true
+				}
 			}
-		},
-		experimentalUseElementAccessInTemplate: vueOptions.experimentalUseElementAccessInTemplate ?? false,
+		).map(([k, v]) => [camelize(k), v])),
 	};
+}
+
+export function setupGlobalTypes(rootDir: string, vueOptions: VueCompilerOptions, host: {
+	fileExists(path: string): boolean;
+	writeFile?(path: string, data: string): void;
+}) {
+	if (!host.writeFile) {
+		return false;
+	}
+	try {
+		let dir = rootDir;
+		while (!host.fileExists(path.join(dir, 'node_modules', vueOptions.lib, 'package.json'))) {
+			const parentDir = path.dirname(dir);
+			if (dir === parentDir) {
+				throw 0;
+			}
+			dir = parentDir;
+		}
+		const globalTypesPath = path.join(dir, 'node_modules', '.vue-global-types', `${vueOptions.lib}_${vueOptions.target}_${vueOptions.strictTemplates}.d.ts`);
+		const globalTypesContents = `// @ts-nocheck\nexport {};\n` + generateGlobalTypes(vueOptions.lib, vueOptions.target, vueOptions.strictTemplates);
+		host.writeFile(globalTypesPath, globalTypesContents);
+		return true;
+	} catch {
+		return false;
+	}
 }

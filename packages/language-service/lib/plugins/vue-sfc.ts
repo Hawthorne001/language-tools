@@ -1,67 +1,60 @@
-import type { LanguageServicePlugin, LanguageServicePluginInstance } from '@volar/language-service';
+import type { LanguageServicePlugin, LanguageServicePluginInstance, LanguageServiceContext } from '@volar/language-service';
 import * as vue from '@vue/language-core';
 import { create as createHtmlService } from 'volar-service-html';
 import * as html from 'vscode-html-languageservice';
 import type * as vscode from 'vscode-languageserver-protocol';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 import { loadLanguageBlocks } from './data';
+import { URI } from 'vscode-uri';
 
 let sfcDataProvider: html.IHTMLDataProvider | undefined;
 
-export interface Provide {
-	'vue/vueFile': (document: TextDocument) => vue.VueGeneratedCode | undefined;
-}
-
 export function create(): LanguageServicePlugin {
+	const htmlPlugin = createHtmlService({
+		documentSelector: ['vue-root-tags'],
+		useDefaultDataProvider: false,
+		getCustomData(context) {
+			sfcDataProvider ??= html.newHTMLDataProvider('vue', loadLanguageBlocks(context.env.locale ?? 'en'));
+			return [sfcDataProvider];
+		},
+		async getFormattingOptions(document, options, context) {
+			return await worker(document, context, async vueCode => {
+
+				const formatSettings = await context.env.getConfiguration?.<html.HTMLFormatConfiguration>('html.format') ?? {};
+				const blockTypes = ['template', 'script', 'style'];
+
+				for (const customBlock of vueCode._sfc.customBlocks) {
+					blockTypes.push(customBlock.type);
+				}
+
+				return {
+					...options,
+					...formatSettings,
+					wrapAttributes: await context.env.getConfiguration?.<string>('vue.format.wrapAttributes') ?? 'auto',
+					unformatted: '',
+					contentUnformatted: blockTypes.join(','),
+					endWithNewline: options.insertFinalNewline ? true
+						: options.trimFinalNewlines ? false
+							: document.getText().endsWith('\n'),
+				};
+			}) ?? {};
+		},
+	});
 	return {
+		...htmlPlugin,
 		name: 'vue-sfc',
-		create(context): LanguageServicePluginInstance<Provide> {
-			const htmlPlugin = createHtmlService({
-				documentSelector: ['vue'],
-				useDefaultDataProvider: false,
-				getCustomData(context) {
-					sfcDataProvider ??= html.newHTMLDataProvider('vue', loadLanguageBlocks(context.env.locale ?? 'en'));
-					return [sfcDataProvider];
-				},
-				async getFormattingOptions(document, options, context) {
-					return await worker(document, async vueCode => {
-
-						const formatSettings = await context.env.getConfiguration?.<html.HTMLFormatConfiguration>('html.format') ?? {};
-						const blockTypes = ['template', 'script', 'style'];
-
-						for (const customBlock of vueCode.sfc.customBlocks) {
-							blockTypes.push(customBlock.type);
-						}
-
-						return {
-							...options,
-							...formatSettings,
-							wrapAttributes: await context.env.getConfiguration?.<string>('vue.format.wrapAttributes') ?? 'auto',
-							unformatted: '',
-							contentUnformatted: blockTypes.join(','),
-							endWithNewline: options.insertFinalNewline ? true
-								: options.trimFinalNewlines ? false
-									: document.getText().endsWith('\n'),
-						};
-					}) ?? {};
-				},
-			}).create(context);
+		create(context): LanguageServicePluginInstance {
+			const htmlPluginInstance = htmlPlugin.create(context);
 
 			return {
 
-				...htmlPlugin,
+				...htmlPluginInstance,
 
-				provide: {
-					'vue/vueFile': document => {
-						return worker(document, vueFile => {
-							return vueFile;
-						});
-					},
-				},
+				provideDocumentLinks: undefined,
 
 				async resolveEmbeddedCodeFormattingOptions(sourceScript, virtualCode, options) {
-					if (sourceScript.generated?.root instanceof vue.VueGeneratedCode) {
-						if (virtualCode.id === 'scriptFormat' || virtualCode.id === 'scriptSetupFormat') {
+					if (sourceScript.generated?.root instanceof vue.VueVirtualCode) {
+						if (virtualCode.id === 'script_raw' || virtualCode.id === 'scriptsetup_raw') {
 							if (await context.env.getConfiguration?.('vue.format.script.initialIndent') ?? false) {
 								options.initialIndentLevel++;
 							}
@@ -80,13 +73,11 @@ export function create(): LanguageServicePlugin {
 					return options;
 				},
 
-				provideDocumentLinks: undefined,
-
 				provideDocumentSymbols(document) {
-					return worker(document, vueSourceFile => {
+					return worker(document, context, vueSourceFile => {
 
 						const result: vscode.DocumentSymbol[] = [];
-						const descriptor = vueSourceFile.sfc;
+						const descriptor = vueSourceFile._sfc;
 
 						if (descriptor.template) {
 							result.push({
@@ -169,16 +160,108 @@ export function create(): LanguageServicePlugin {
 						return result;
 					});
 				},
-			};
 
-			function worker<T>(document: TextDocument, callback: (vueSourceFile: vue.VueGeneratedCode) => T) {
-				const decoded = context.decodeEmbeddedDocumentUri(document.uri);
-				const sourceScript = decoded && context.language.scripts.get(decoded[0]);
-				const virtualCode = decoded && sourceScript?.generated?.embeddedCodes.get(decoded[1]);
-				if (virtualCode instanceof vue.VueGeneratedCode) {
-					return callback(virtualCode);
-				}
-			}
+				async provideCompletionItems(document, position, context, token) {
+					const result = await htmlPluginInstance.provideCompletionItems?.(document, position, context, token);
+					if (!result) {
+						return;
+					}
+					result.items = result.items.filter(item => item.label !== '!DOCTYPE' && item.label !== 'Custom Blocks');
+
+					const tags = sfcDataProvider?.provideTags();
+
+					const scriptLangs = getLangs('script');
+					const scriptItems = result.items.filter(item => item.label === 'script' || item.label === 'script setup');
+					for (const scriptItem of scriptItems) {
+						scriptItem.kind = 17 satisfies typeof vscode.CompletionItemKind.File;
+						scriptItem.detail = '.js';
+						for (const lang of scriptLangs) {
+							result.items.push({
+								...scriptItem,
+								detail: `.${lang}`,
+								kind: 17 satisfies typeof vscode.CompletionItemKind.File,
+								label: scriptItem.label + ' lang="' + lang + '"',
+								textEdit: scriptItem.textEdit ? {
+									...scriptItem.textEdit,
+									newText: scriptItem.textEdit.newText + ' lang="' + lang + '"',
+								} : undefined,
+							});
+						}
+					}
+
+					const styleLangs = getLangs('style');
+					const styleItem = result.items.find(item => item.label === 'style');
+					if (styleItem) {
+						styleItem.kind = 17 satisfies typeof vscode.CompletionItemKind.File;
+						styleItem.detail = '.css';
+						for (const lang of styleLangs) {
+							result.items.push(
+								getStyleCompletionItem(styleItem, lang),
+								getStyleCompletionItem(styleItem, lang, 'scoped'),
+								getStyleCompletionItem(styleItem, lang, 'module')
+							);
+						}
+					}
+
+					const templateLangs = getLangs('template');
+					const templateItem = result.items.find(item => item.label === 'template');
+					if (templateItem) {
+						templateItem.kind = 17 satisfies typeof vscode.CompletionItemKind.File;
+						templateItem.detail = '.html';
+						for (const lang of templateLangs) {
+							if (lang === 'html') {
+								continue;
+							}
+							result.items.push({
+								...templateItem,
+								kind: 17 satisfies typeof vscode.CompletionItemKind.File,
+								detail: `.${lang}`,
+								label: templateItem.label + ' lang="' + lang + '"',
+								textEdit: templateItem.textEdit ? {
+									...templateItem.textEdit,
+									newText: templateItem.textEdit.newText + ' lang="' + lang + '"',
+								} : undefined,
+							});
+						}
+					}
+					return result;
+
+					function getLangs(label: string) {
+						return tags
+							?.find(tag => tag.name === label)?.attributes
+							.find(attr => attr.name === 'lang')?.values
+							?.map(({ name }) => name) ?? [];
+					}
+				},
+			};
 		},
+	};
+
+	function worker<T>(document: TextDocument, context: LanguageServiceContext, callback: (vueSourceFile: vue.VueVirtualCode) => T) {
+		if (document.languageId !== 'vue-root-tags') {
+			return;
+		}
+		const decoded = context.decodeEmbeddedDocumentUri(URI.parse(document.uri));
+		const sourceScript = decoded && context.language.scripts.get(decoded[0]);
+		if (sourceScript?.generated?.root instanceof vue.VueVirtualCode) {
+			return callback(sourceScript.generated.root);
+		}
+	}
+}
+
+function getStyleCompletionItem(
+	styleItem: vscode.CompletionItem,
+	lang: string,
+	attr?: string
+): vscode.CompletionItem {
+	return {
+		...styleItem,
+		kind: 17 satisfies typeof vscode.CompletionItemKind.File,
+		detail: lang === 'postcss' ? '.css' : `.${lang}`,
+		label: styleItem.label + ' lang="' + lang + '"' + (attr ? ` ${attr}` : ''),
+		textEdit: styleItem.textEdit ? {
+			...styleItem.textEdit,
+			newText: styleItem.textEdit.newText + ' lang="' + lang + '"' + (attr ? ` ${attr}` : ''),
+		} : undefined
 	};
 }

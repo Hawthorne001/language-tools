@@ -1,19 +1,19 @@
+import { TypeScriptProjectHost, createLanguageServiceHost, resolveFileLanguageId } from '@volar/typescript';
 import * as vue from '@vue/language-core';
+import { posix as path } from 'path-browserify';
 import type * as ts from 'typescript';
-import * as path from 'path-browserify';
 import { code as typeHelpersCode } from 'vue-component-type-helpers';
 import { code as vue2TypeHelpersCode } from 'vue-component-type-helpers/vue2';
-import { createTypeScriptLanguage } from '@volar/typescript';
 
 import type {
-	MetaCheckerOptions,
 	ComponentMeta,
+	Declaration,
 	EventMeta,
 	ExposeMeta,
+	MetaCheckerOptions,
 	PropertyMeta,
 	PropertyMetaSchema,
-	SlotMeta,
-	Declaration
+	SlotMeta
 } from './types';
 
 export * from './types';
@@ -24,82 +24,169 @@ export function createCheckerByJsonConfigBase(
 	ts: typeof import('typescript'),
 	rootDir: string,
 	json: any,
-	checkerOptions: MetaCheckerOptions = {},
+	checkerOptions: MetaCheckerOptions = {}
 ) {
 	rootDir = rootDir.replace(windowsPathReg, '/');
-	return createCheckerWorker(
+	return baseCreate(
 		ts,
-		() => vue.createParsedCommandLineByJson(ts, ts.sys, rootDir, json),
+		() => vue.createParsedCommandLineByJson(ts, ts.sys, rootDir, json, undefined, true),
 		checkerOptions,
 		rootDir,
-		path.join(rootDir, 'jsconfig.json.global.vue'),
-		undefined
+		path.join(rootDir, 'jsconfig.json.global.vue')
 	);
 }
 
 export function createCheckerBase(
 	ts: typeof import('typescript'),
 	tsconfig: string,
-	checkerOptions: MetaCheckerOptions = {},
+	checkerOptions: MetaCheckerOptions = {}
 ) {
 	tsconfig = tsconfig.replace(windowsPathReg, '/');
-	return createCheckerWorker(
+	return baseCreate(
 		ts,
-		() => vue.createParsedCommandLine(ts, ts.sys, tsconfig),
+		() => vue.createParsedCommandLine(ts, ts.sys, tsconfig, true),
 		checkerOptions,
 		path.dirname(tsconfig),
-		tsconfig + '.global.vue',
-		tsconfig,
+		tsconfig + '.global.vue'
 	);
 }
 
-function createCheckerWorker(
+export function baseCreate(
 	ts: typeof import('typescript'),
-	loadParsedCommandLine: () => vue.ParsedCommandLine,
+	getCommandLine: () => vue.ParsedCommandLine,
 	checkerOptions: MetaCheckerOptions,
 	rootPath: string,
-	globalComponentName: string,
-	configFileName: string | undefined,
+	globalComponentName: string
 ) {
-
-	/**
-	 * Original Host
-	 */
-
-	let parsedCommandLine = loadParsedCommandLine();
-	let fileNames = parsedCommandLine.fileNames.map(path => path.replace(windowsPathReg, '/'));
+	let commandLine = getCommandLine();
+	let fileNames = commandLine.fileNames.map(path => path.replace(windowsPathReg, '/'));
 	let projectVersion = 0;
 
-	const scriptSnapshots = new Map<string, ts.IScriptSnapshot>();
-	const projectHost: vue.TypeScriptProjectHost = {
-		...ts.sys,
-		configFileName,
+	const projectHost: TypeScriptProjectHost = {
 		getCurrentDirectory: () => rootPath,
 		getProjectVersion: () => projectVersion.toString(),
-		getCompilationSettings: () => parsedCommandLine.options,
+		getCompilationSettings: () => commandLine.options,
 		getScriptFileNames: () => fileNames,
-		getProjectReferences: () => parsedCommandLine.projectReferences,
-		getScriptSnapshot: fileName => {
-			if (!scriptSnapshots.has(fileName)) {
-				const fileText = ts.sys.readFile(fileName);
-				if (fileText !== undefined) {
-					scriptSnapshots.set(fileName, ts.ScriptSnapshot.fromString(fileText));
-				}
-			}
-			return scriptSnapshots.get(fileName);
-		},
-		getLanguageId: fileName => {
-			if (parsedCommandLine.vueOptions.extensions.some(ext => fileName.endsWith(ext))) {
-				return 'vue';
-			}
-			return vue.resolveCommonLanguageId(fileName);
-		},
-		scriptIdToFileName: id => id,
-		fileNameToScriptId: id => id,
+		getProjectReferences: () => commandLine.projectReferences,
+	};
+	const globalComponentSnapshot = ts.ScriptSnapshot.fromString('<script setup lang="ts"></script>');
+	const scriptSnapshots = new Map<string, ts.IScriptSnapshot | undefined>();
+	const metaSnapshots = new Map<string, ts.IScriptSnapshot>();
+	const getScriptFileNames = projectHost.getScriptFileNames;
+	projectHost.getScriptFileNames = () => {
+		const names = getScriptFileNames();
+		return [
+			...names,
+			...names.map(getMetaFileName),
+			globalComponentName,
+			getMetaFileName(globalComponentName),
+		];
 	};
 
+	const vueLanguagePlugin = vue.createVueLanguagePlugin<string>(
+		ts,
+		projectHost.getCompilationSettings(),
+		commandLine.vueOptions,
+		id => id
+	);
+	const language = vue.createLanguage(
+		[
+			vueLanguagePlugin,
+			{
+				getLanguageId(fileName) {
+					return resolveFileLanguageId(fileName);
+				},
+			},
+		],
+		new vue.FileMap(ts.sys.useCaseSensitiveFileNames),
+		fileName => {
+			let snapshot = scriptSnapshots.get(fileName);
+
+			if (fileName === globalComponentName) {
+				snapshot = globalComponentSnapshot;
+			}
+			else if (isMetaFileName(fileName)) {
+				if (!metaSnapshots.has(fileName)) {
+					metaSnapshots.set(fileName, ts.ScriptSnapshot.fromString(getMetaScriptContent(fileName)));
+				}
+				snapshot = metaSnapshots.get(fileName);
+			}
+			else {
+				if (!scriptSnapshots.has(fileName)) {
+					const fileText = ts.sys.readFile(fileName);
+					if (fileText !== undefined) {
+						scriptSnapshots.set(fileName, ts.ScriptSnapshot.fromString(fileText));
+					}
+					else {
+						scriptSnapshots.set(fileName, undefined);
+					}
+				}
+				snapshot = scriptSnapshots.get(fileName);
+			}
+
+			if (snapshot) {
+				language.scripts.set(fileName, snapshot);
+			}
+			else {
+				language.scripts.delete(fileName);
+			}
+		}
+	);
+	const { languageServiceHost } = createLanguageServiceHost(ts, ts.sys, language, s => s, projectHost);
+	const tsLs = ts.createLanguageService(languageServiceHost);
+
+	const directoryExists = languageServiceHost.directoryExists?.bind(languageServiceHost);
+	const fileExists = languageServiceHost.fileExists.bind(languageServiceHost);
+	const getScriptSnapshot = languageServiceHost.getScriptSnapshot.bind(languageServiceHost);
+	const globalTypesName = `${commandLine.vueOptions.lib}_${commandLine.vueOptions.target}_${commandLine.vueOptions.strictTemplates}.d.ts`;
+	const globalTypesContents = `// @ts-nocheck\nexport {};\n` + vue.generateGlobalTypes(commandLine.vueOptions.lib, commandLine.vueOptions.target, commandLine.vueOptions.strictTemplates);
+	const globalTypesSnapshot: ts.IScriptSnapshot = {
+		getText: (start, end) => globalTypesContents.substring(start, end),
+		getLength: () => globalTypesContents.length,
+		getChangeRange: () => undefined,
+	};
+	if (directoryExists) {
+		languageServiceHost.directoryExists = path => {
+			if (path.endsWith('.vue-global-types')) {
+				return true;
+			}
+			return directoryExists(path);
+		};
+	}
+	languageServiceHost.fileExists = path => {
+		if (path.endsWith(`.vue-global-types/${globalTypesName}`) || path.endsWith(`.vue-global-types\\${globalTypesName}`)) {
+			return true;
+		}
+		return fileExists(path);
+	};
+	languageServiceHost.getScriptSnapshot = path => {
+		if (path.endsWith(`.vue-global-types/${globalTypesName}`) || path.endsWith(`.vue-global-types\\${globalTypesName}`)) {
+			return globalTypesSnapshot;
+		}
+		return getScriptSnapshot(path);
+	};
+
+	if (checkerOptions.forceUseTs) {
+		const getScriptKind = languageServiceHost.getScriptKind?.bind(languageServiceHost);
+		languageServiceHost.getScriptKind = fileName => {
+			const scriptKind = getScriptKind!(fileName);
+			if (commandLine.vueOptions.extensions.some(ext => fileName.endsWith(ext))) {
+				if (scriptKind === ts.ScriptKind.JS) {
+					return ts.ScriptKind.TS;
+				}
+				if (scriptKind === ts.ScriptKind.JSX) {
+					return ts.ScriptKind.TSX;
+				}
+			}
+			return scriptKind;
+		};
+	}
+
+	let globalPropNames: string[] | undefined;
+
 	return {
-		...baseCreate(ts, projectHost, parsedCommandLine.vueOptions, checkerOptions, globalComponentName),
+		getExportNames,
+		getComponentMeta,
 		updateFile(fileName: string, text: string) {
 			fileName = fileName.replace(windowsPathReg, '/');
 			scriptSnapshots.set(fileName, ts.ScriptSnapshot.fromString(text));
@@ -111,87 +198,14 @@ function createCheckerWorker(
 			projectVersion++;
 		},
 		reload() {
-			parsedCommandLine = loadParsedCommandLine();
-			fileNames = parsedCommandLine.fileNames.map(path => path.replace(windowsPathReg, '/'));
+			commandLine = getCommandLine();
+			fileNames = commandLine.fileNames.map(path => path.replace(windowsPathReg, '/'));
 			this.clearCache();
 		},
 		clearCache() {
 			scriptSnapshots.clear();
 			projectVersion++;
 		},
-	};
-}
-
-export function baseCreate(
-	ts: typeof import('typescript'),
-	host: vue.TypeScriptProjectHost,
-	vueCompilerOptions: vue.VueCompilerOptions,
-	checkerOptions: MetaCheckerOptions,
-	globalComponentName: string,
-) {
-	const globalComponentSnapshot = ts.ScriptSnapshot.fromString('<script setup lang="ts"></script>');
-	const metaSnapshots: Record<string, ts.IScriptSnapshot> = {};
-	const getScriptFileNames = host.getScriptFileNames;
-	const getScriptSnapshot = host.getScriptSnapshot;
-	host.getScriptFileNames = () => {
-		const names = getScriptFileNames();
-		return [
-			...names,
-			...names.map(getMetaFileName),
-			globalComponentName,
-			getMetaFileName(globalComponentName),
-		];
-	};
-	host.getScriptSnapshot = fileName => {
-		if (isMetaFileName(fileName)) {
-			if (!metaSnapshots[fileName]) {
-				metaSnapshots[fileName] = ts.ScriptSnapshot.fromString(getMetaScriptContent(fileName));
-			}
-			return metaSnapshots[fileName];
-		}
-		else if (fileName === globalComponentName) {
-			return globalComponentSnapshot;
-		}
-		else {
-			return getScriptSnapshot(fileName);
-		}
-	};
-
-	const vueLanguagePlugin = vue.createVueLanguagePlugin(
-		ts,
-		id => id,
-		ts.sys.useCaseSensitiveFileNames,
-		() => host.getProjectVersion?.() ?? '',
-		() => host.getScriptFileNames(),
-		host.getCompilationSettings(),
-		vueCompilerOptions,
-	);
-	const language = createTypeScriptLanguage(
-		ts,
-		[vueLanguagePlugin],
-		host,
-	);
-	const { languageServiceHost } = language.typescript!;
-	const tsLs = ts.createLanguageService(languageServiceHost);
-
-	if (checkerOptions.forceUseTs) {
-		const getScriptKind = languageServiceHost.getScriptKind?.bind(languageServiceHost);
-		languageServiceHost.getScriptKind = fileName => {
-			if (fileName.endsWith('.vue.js')) {
-				return ts.ScriptKind.TS;
-			}
-			if (fileName.endsWith('.vue.jsx')) {
-				return ts.ScriptKind.TSX;
-			}
-			return getScriptKind!(fileName);
-		};
-	}
-
-	let globalPropNames: string[] | undefined;
-
-	return {
-		getExportNames,
-		getComponentMeta,
 		__internal__: {
 			tsLs,
 		},
@@ -202,7 +216,11 @@ export function baseCreate(
 	}
 
 	function getMetaFileName(fileName: string) {
-		return (fileName.endsWith('.vue') ? fileName : fileName.substring(0, fileName.lastIndexOf('.'))) + '.meta.ts';
+		return (
+			commandLine.vueOptions.extensions.some(ext => fileName.endsWith(ext))
+				? fileName
+				: fileName.substring(0, fileName.lastIndexOf('.'))
+		) + '.meta.ts';
 	}
 
 	function getMetaScriptContent(fileName: string) {
@@ -218,7 +236,7 @@ interface ComponentMeta<T> {
 	exposed: ComponentExposed<T>;
 };
 
-${vueCompilerOptions.target < 3 ? vue2TypeHelpersCode : typeHelpersCode}
+${commandLine.vueOptions.target < 3 ? vue2TypeHelpersCode : typeHelpersCode}
 `.trim();
 		return code;
 	}
@@ -310,18 +328,18 @@ ${vueCompilerOptions.target < 3 ? vue2TypeHelpersCode : typeHelpersCode}
 
 			// fill defaults
 			const printer = ts.createPrinter(checkerOptions.printer);
-			const snapshot = host.getScriptSnapshot(componentPath)!;
+			const snapshot = language.scripts.get(componentPath)?.snapshot!;
 
 			const vueFile = language.scripts.get(componentPath)?.generated?.root;
 			const vueDefaults = vueFile && exportName === 'default'
-				? (vueFile instanceof vue.VueGeneratedCode ? readVueComponentDefaultProps(vueFile, printer, ts, vueCompilerOptions) : {})
+				? (vueFile instanceof vue.VueVirtualCode ? readVueComponentDefaultProps(vueFile, printer, ts, commandLine.vueOptions) : {})
 				: {};
 			const tsDefaults = !vueFile ? readTsComponentDefaultProps(
 				componentPath.substring(componentPath.lastIndexOf('.') + 1), // ts | js | tsx | jsx
 				snapshot.getText(0, snapshot.getLength()),
 				exportName,
 				printer,
-				ts,
+				ts
 			) : {};
 
 			for (const [propName, defaultExp] of Object.entries({
@@ -413,7 +431,7 @@ ${vueCompilerOptions.target < 3 ? vue2TypeHelpersCode : typeHelpersCode}
 	function _getExports(
 		program: ts.Program,
 		typeChecker: ts.TypeChecker,
-		componentPath: string,
+		componentPath: string
 	) {
 
 		const sourceFile = program?.getSourceFile(getMetaFileName(componentPath));
@@ -459,7 +477,7 @@ function createSchemaResolvers(
 	symbolNode: ts.Expression,
 	{ rawType, schema: options, noDeclarations }: MetaCheckerOptions,
 	ts: typeof import('typescript'),
-	language: vue.Language,
+	language: vue.Language<string>
 ) {
 	const visited = new Set<ts.Type>();
 
@@ -565,6 +583,11 @@ function createSchemaResolvers(
 
 		return {
 			name: (typeChecker.getTypeOfSymbolAtLocation(call.parameters[0], symbolNode) as ts.StringLiteralType).value,
+			description: ts.displayPartsToString(call.getDocumentationComment(typeChecker)),
+			tags: call.getJsDocTags().map(tag => ({
+				name: tag.name,
+				text: tag.text !== undefined ? ts.displayPartsToString(tag.text) : undefined,
+			})),
 			type: typeChecker.typeToString(subtype),
 			rawType: rawType ? subtype : undefined,
 			signature: typeChecker.signatureToString(call),
@@ -655,15 +678,15 @@ function createSchemaResolvers(
 		if (sourceFile?.generated) {
 			const script = sourceFile.generated.languagePlugin.typescript?.getServiceScript(sourceFile.generated.root);
 			if (script) {
-				for (const [source, [_, map]] of language.maps.forEach(script.code)) {
-					const start = map.getSourceOffset(declaration.getStart());
-					const end = map.getSourceOffset(declaration.getEnd());
-					if (start && end) {
-						return {
-							file: source,
-							range: [start[0], end[0]],
-						};
-					};
+				for (const [sourceScript, map] of language.maps.forEach(script.code)) {
+					for (const [start] of map.toSourceLocation(declaration.getStart())) {
+						for (const [end] of map.toSourceLocation(declaration.getEnd())) {
+							return {
+								file: sourceScript.id,
+								range: [start, end],
+							};
+						}
+					}
 				}
 			}
 			return undefined;
@@ -684,10 +707,10 @@ function createSchemaResolvers(
 }
 
 function readVueComponentDefaultProps(
-	vueSourceFile: vue.VueGeneratedCode,
+	vueSourceFile: vue.VueVirtualCode,
 	printer: ts.Printer | undefined,
 	ts: typeof import('typescript'),
-	vueCompilerOptions: vue.VueCompilerOptions,
+	vueCompilerOptions: vue.VueCompilerOptions
 ) {
 	let result: Record<string, { default?: string, required?: boolean; }> = {};
 
@@ -698,7 +721,7 @@ function readVueComponentDefaultProps(
 
 	function scriptSetupWorker() {
 
-		const descriptor = vueSourceFile.sfc;
+		const descriptor = vueSourceFile._sfc;
 		const scriptSetupRanges = descriptor.scriptSetup ? vue.parseScriptSetupRanges(ts, descriptor.scriptSetup.ast, vueCompilerOptions) : undefined;
 
 		if (descriptor.scriptSetup && scriptSetupRanges?.props.withDefaults?.arg) {
@@ -749,7 +772,7 @@ function readVueComponentDefaultProps(
 
 	function scriptWorker() {
 
-		const descriptor = vueSourceFile.sfc;
+		const descriptor = vueSourceFile._sfc;
 
 		if (descriptor.script) {
 			const scriptResult = readTsComponentDefaultProps(descriptor.script.lang, descriptor.script.content, 'default', printer, ts);
@@ -765,7 +788,7 @@ function readTsComponentDefaultProps(
 	tsFileText: string,
 	exportName: string,
 	printer: ts.Printer | undefined,
-	ts: typeof import('typescript'),
+	ts: typeof import('typescript')
 ) {
 
 	const ast = ts.createSourceFile('/tmp.' + lang, tsFileText, ts.ScriptTarget.Latest);
@@ -844,7 +867,7 @@ function resolvePropsOption(
 	ast: ts.SourceFile,
 	props: ts.ObjectLiteralExpression,
 	printer: ts.Printer | undefined,
-	ts: typeof import('typescript'),
+	ts: typeof import('typescript')
 ) {
 
 	const result: Record<string, { default?: string, required?: boolean; }> = {};
@@ -877,7 +900,7 @@ function resolvePropsOption(
 
 function resolveDefaultOptionExpression(
 	_default: ts.Expression,
-	ts: typeof import('typescript'),
+	ts: typeof import('typescript')
 ) {
 	if (ts.isArrowFunction(_default)) {
 		if (ts.isBlock(_default.body)) {

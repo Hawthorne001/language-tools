@@ -11,7 +11,8 @@
 						2,
 						2.7,
 						3,
-						3.3
+						3.3,
+						3.5
 					],
 					"markdownDescription": "Target version of Vue."
 				},
@@ -20,9 +21,19 @@
 					"default": [ ".vue" ],
 					"markdownDescription": "Valid file extensions that should be considered as regular Vue SFC, please note that you should not use this option separately for additional file extensions IDE support, see https://github.com/vuejs/language-tools/tree/master/extensions/vscode/README.md#custom-file-extensions."
 				},
+				"vitePressExtensions": {
+					"type": "array",
+					"default": [ ".md" ],
+					"markdownDescription": "Valid file extensions that should be considered as regular VitePress SFC."
+				},
+				"petiteVueExtensions": {
+					"type": "array",
+					"default": [ ".html" ],
+					"markdownDescription": "Valid file extensions that should be considered as regular PetiteVue SFC."
+				},
 				"lib": {
-					"default": "",
-					"markdownDescription": "Specify module name for import regular types. (If empty, will use `@vue/runtime-dom` for target < 2.7, `vue` for target >= 2.7)"
+					"default": "vue",
+					"markdownDescription": "Specify module name for import regular types."
 				},
 				"jsxSlots": {
 					"type": "boolean",
@@ -36,16 +47,13 @@
 				},
 				"skipTemplateCodegen": {
 					"type": "boolean",
+					"default": false,
 					"markdownDescription": "https://github.com/vuejs/language-tools/issues/577"
 				},
-				"nativeTags": {
-					"type": "array",
-					"default": [
-						"div",
-						"img",
-						"..."
-					],
-					"markdownDescription": "List of valid intrinsic elements."
+				"fallthroughAttributes": {
+					"type": "boolean",
+					"default": false,
+					"markdownDescription": "Enable to support typed fallthrough attributes. Please note that enabling may significantly slow down type checking."
 				},
 				"dataAttributes": {
 					"type": "array",
@@ -77,7 +85,8 @@
 						"defineSlots": [ "defineSlots" ],
 						"defineEmits": [ "defineEmits" ],
 						"defineExpose": [ "defineExpose" ],
-						"withDefaults": [ "withDefaults" ]
+						"withDefaults": [ "withDefaults" ],
+						"templateRef": [ "templateRef", "useTemplateRef" ]
 					}
 				},
 				"experimentalResolveStyleCssClasses": {
@@ -87,11 +96,6 @@
 						"never"
 					],
 					"markdownDescription": "https://github.com/vuejs/language-tools/issues/1038, https://github.com/vuejs/language-tools/issues/1121"
-				},
-				"experimentalUseElementAccessInTemplate": {
-					"type": "boolean",
-					"default": false,
-					"markdownDescription": "https://github.com/vuejs/language-tools/issues/997"
 				},
 				"experimentalModelPropName": {
 					"type": "object",
