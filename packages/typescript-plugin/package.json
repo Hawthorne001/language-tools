@@ -13,7 +13,7 @@
 	},
 	"dependencies": {
 		"@volar/typescript": "2.2.0-alpha.9",
-		"@vue/language-core": "2.0.13",
+		"@vue/language-core": "2.0.29",
 		"@vue/shared": "^3.4.0"
 	},
 	"devDependencies": {
