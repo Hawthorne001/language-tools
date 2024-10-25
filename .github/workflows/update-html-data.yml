@@ -11,9 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: latest
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
@@ -24,7 +22,7 @@ jobs:
 
       # update data
       - name: Update HTML Data
-        run: cd packages/language-service && npm run update-html-data
+        run: cd packages/language-service && pnpm run update-html-data
 
       # commit
       - name: Commit

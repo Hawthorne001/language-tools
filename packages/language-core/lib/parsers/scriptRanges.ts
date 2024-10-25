@@ -12,8 +12,11 @@ export function parseScriptRanges(ts: typeof import('typescript'), ast: ts.Sourc
 		argsNode: ts.ObjectLiteralExpression | undefined,
 		componentsOption: TextRange | undefined,
 		componentsOptionNode: ts.ObjectLiteralExpression | undefined,
+		directivesOption: TextRange | undefined,
 		nameOption: TextRange | undefined,
+		inheritAttrsOption: string | undefined,
 	}) | undefined;
+	let classBlockEnd: number | undefined;
 
 	const bindings = hasScriptSetup ? parseBindingRanges(ts, ast) : [];
 
@@ -38,15 +41,23 @@ export function parseScriptRanges(ts: typeof import('typescript'), ast: ts.Sourc
 			}
 			if (obj) {
 				let componentsOptionNode: ts.ObjectLiteralExpression | undefined;
+				let directivesOptionNode: ts.ObjectLiteralExpression | undefined;
 				let nameOptionNode: ts.Expression | undefined;
+				let inheritAttrsOption: string | undefined;
 				ts.forEachChild(obj, node => {
 					if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
 						const name = getNodeText(ts, node.name, ast);
 						if (name === 'components' && ts.isObjectLiteralExpression(node.initializer)) {
 							componentsOptionNode = node.initializer;
 						}
-						if (name === 'name') {
+						else if (name === 'directives' && ts.isObjectLiteralExpression(node.initializer)) {
+							directivesOptionNode = node.initializer;
+						}
+						else if (name === 'name') {
 							nameOptionNode = node.initializer;
+						}
+						else if (name === 'inheritAttrs') {
+							inheritAttrsOption = getNodeText(ts, node.initializer, ast);
 						}
 					}
 				});
@@ -57,14 +68,25 @@ export function parseScriptRanges(ts: typeof import('typescript'), ast: ts.Sourc
 					argsNode: withNode ? obj : undefined,
 					componentsOption: componentsOptionNode ? _getStartEnd(componentsOptionNode) : undefined,
 					componentsOptionNode: withNode ? componentsOptionNode : undefined,
+					directivesOption: directivesOptionNode ? _getStartEnd(directivesOptionNode) : undefined,
 					nameOption: nameOptionNode ? _getStartEnd(nameOptionNode) : undefined,
+					inheritAttrsOption,
 				};
 			}
+		}
+
+		if (
+			ts.isClassDeclaration(raw)
+			&& raw.modifiers?.some(mod => mod.kind === ts.SyntaxKind.ExportKeyword)
+			&& raw.modifiers?.some(mod => mod.kind === ts.SyntaxKind.DefaultKeyword)
+		) {
+			classBlockEnd = raw.end - 1;
 		}
 	});
 
 	return {
 		exportDefault,
+		classBlockEnd,
 		bindings,
 	};
 

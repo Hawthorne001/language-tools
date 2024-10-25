@@ -1,5 +1,5 @@
 import { createLabsInfo } from '@volar/vscode';
-import * as serverLib from '@vue/language-server';
+import * as protocol from '@vue/language-server/protocol';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import * as lsp from '@volar/vscode/node';
@@ -9,8 +9,7 @@ import { middleware } from './middleware';
 
 export async function activate(context: vscode.ExtensionContext) {
 
-	const volarLabs = createLabsInfo(serverLib);
-	volarLabs.extensionExports.volarLabs.codegenStackSupport = true;
+	const volarLabs = createLabsInfo(protocol);
 
 	await commonActivate(context, (
 		id,
@@ -36,7 +35,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			runOptions.execArgv.push("--max-old-space-size=" + config.server.maxOldSpaceSize);
 		}
 		const debugOptions: lsp.ForkOptions = { execArgv: ['--nolazy', '--inspect=' + port] };
-		let serverOptions: lsp.ServerOptions = {
+		const serverOptions: lsp.ServerOptions = {
 			run: {
 				module: serverModule.fsPath,
 				transport: lsp.TransportKind.ipc,
@@ -56,7 +55,7 @@ export async function activate(context: vscode.ExtensionContext) {
 				isTrusted: true,
 				supportHtml: true,
 			},
-			outputChannel
+			outputChannel,
 		};
 		const client = new _LanguageClient(
 			id,
@@ -146,18 +145,17 @@ try {
 					s => s + `.filter(p=>p.name!=='typescript-vue-plugin-bundle')`
 				);
 			}
-			else if (!enabledHybridMode) {
+			else if (enabledHybridMode) {
 				// patch readPlugins
 				text = text.replace(
 					'languages:Array.isArray(e.languages)',
 					[
 						'languages:',
-						`e.name==='typescript-vue-plugin-bundle'?[]:`,
-						'Array.isArray(e.languages)',
-					].join(''),
+						`e.name==='typescript-vue-plugin-bundle'?[${config.server.includeLanguages.map(lang => `"${lang}"`).join(',')}]`,
+						':Array.isArray(e.languages)',
+					].join('')
 				);
-			}
-			else {
+
 				// VSCode < 1.87.0
 				text = text.replace('t.$u=[t.$r,t.$s,t.$p,t.$q]', s => s + '.concat("vue")'); // patch jsTsLanguageModes
 				text = text.replace('.languages.match([t.$p,t.$q,t.$r,t.$s]', s => s + '.concat("vue")'); // patch isSupportedLanguageMode

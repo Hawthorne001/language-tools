@@ -1,11 +1,11 @@
-import { enableAllFeatures } from '../generators/utils';
 import type { VueLanguagePlugin } from '../types';
+import { allCodeFeatures } from './shared';
 
 const plugin: VueLanguagePlugin = () => {
 
 	return {
 
-		version: 2,
+		version: 2.1,
 
 		getEmbeddedCodes(_fileName, sfc) {
 			const result: {
@@ -43,9 +43,9 @@ const plugin: VueLanguagePlugin = () => {
 								cssVar.text,
 								style.name,
 								cssVar.offset,
-								enableAllFeatures({}),
+								allCodeFeatures,
 							],
-							');\n',
+							');\n'
 						);
 					}
 				}
@@ -54,7 +54,7 @@ const plugin: VueLanguagePlugin = () => {
 						style.content,
 						style.name,
 						0,
-						enableAllFeatures({}),
+						allCodeFeatures,
 					]);
 				}
 			}

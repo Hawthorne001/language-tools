@@ -1,36 +1,33 @@
-import { DiagnosticModel, VueInitializationOptions } from '@vue/language-server';
-import * as vscode from 'vscode';
 import * as lsp from '@volar/vscode';
+import { quickPick } from '@volar/vscode/lib/common';
+import type { VueInitializationOptions } from '@vue/language-server';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as semver from 'semver';
+import * as vscode from 'vscode';
 import { config } from './config';
 import * as doctor from './features/doctor';
 import * as nameCasing from './features/nameCasing';
 import * as splitEditors from './features/splitEditors';
-import * as semver from 'semver';
-import * as fs from 'fs';
-import * as path from 'path';
 
 let client: lsp.BaseLanguageClient;
 
 type CreateLanguageClient = (
 	id: string,
 	name: string,
-	langs: lsp.DocumentFilter[],
+	langs: lsp.DocumentSelector,
 	initOptions: VueInitializationOptions,
 	port: number,
 	outputChannel: vscode.OutputChannel,
 ) => lsp.BaseLanguageClient;
 
-export async function activate(context: vscode.ExtensionContext, createLc: CreateLanguageClient) {
+export function activate(context: vscode.ExtensionContext, createLc: CreateLanguageClient) {
 
 	const stopCheck = vscode.window.onDidChangeActiveTextEditor(tryActivate);
 	tryActivate();
 
 	function tryActivate() {
-		if (
-			vscode.window.visibleTextEditors.some(editor => editor.document.languageId === 'vue')
-			|| (config.server.vitePress.supportMdFile && vscode.window.visibleTextEditors.some(editor => editor.document.languageId === 'vue'))
-			|| (config.server.petiteVue.supportHtmlFile && vscode.window.visibleTextEditors.some(editor => editor.document.languageId === 'html'))
-		) {
+		if (vscode.window.visibleTextEditors.some(editor => config.server.includeLanguages.includes(editor.document.languageId))) {
 			doActivate(context, createLc);
 			stopCheck.dispose();
 		}
@@ -47,37 +44,65 @@ function getCurrentTypeScriptPluginStatus(enabledHybridMode: boolean) {
 	return enabledHybridMode || config.server.hybridMode === 'typeScriptPluginOnly';
 }
 
+function isExtensionCompatibleWithHybridMode(extension: vscode.Extension<any>) {
+	if (
+		extension.id === 'Vue.volar'
+		|| extension.id === 'unifiedjs.vscode-mdx'
+		|| extension.id === 'astro-build.astro-vscode'
+		|| extension.id === 'ije.esm-vscode'
+		|| extension.id === 'johnsoncodehk.vscode-tsslint'
+		|| extension.id === 'VisualStudioExptTeam.vscodeintellicode'
+		|| extension.id === 'bierner.lit-html'
+		|| extension.id === 'jenkey2011.string-highlight'
+		|| extension.id === 'mxsdev.typescript-explorer'
+		|| extension.id === 'miaonster.vscode-tsx-arrow-definition'
+		|| extension.id === 'runem.lit-plugin'
+		|| extension.id === 'kimuson.ts-type-expand'
+		|| extension.id === 'p42ai.refactor'
+		|| extension.id === 'styled-components.vscode-styled-components'
+		|| extension.id === 'Divlo.vscode-styled-jsx-languageserver'
+		|| extension.id === 'nrwl.angular-console'
+		|| extension.id === 'ShenQingchuan.vue-vine-extension'
+		|| extension.id === 'ms-dynamics-smb.al'
+	) {
+		return true;
+	}
+	if (extension.id === 'denoland.vscode-deno') {
+		return !vscode.workspace.getConfiguration('deno').get<boolean>('enable');
+	}
+	if (extension.id === 'svelte.svelte-vscode') {
+		return semver.gte(extension.packageJSON.version, '108.4.0');
+	}
+}
+
 function getCurrentHybridModeStatus(report = false) {
+
+	const incompatibleExtensions: string[] = [];
+	const unknownExtensions: string[] = [];
+
+	for (const extension of vscode.extensions.all) {
+		const compatible = isExtensionCompatibleWithHybridMode(extension);
+		if (compatible === false) {
+			incompatibleExtensions.push(extension.id);
+		}
+		else if (compatible === undefined) {
+			const hasTsPlugin = !!extension.packageJSON?.contributes?.typescriptServerPlugins;
+			if (hasTsPlugin) {
+				unknownExtensions.push(extension.id);
+			}
+		}
+	}
+
 	if (config.server.hybridMode === 'typeScriptPluginOnly') {
 		return false;
 	}
 	else if (config.server.hybridMode === 'auto') {
-		const unknownExtensions: string[] = [];
-		for (const extension of vscode.extensions.all) {
-			const hasTsPlugin = !!extension.packageJSON?.contributes?.typescriptServerPlugins;
-			if (hasTsPlugin) {
-				if (
-					extension.id === 'Vue.volar'
-					|| extension.id === 'unifiedjs.vscode-mdx'
-					|| extension.id === 'astro-build.astro-vscode'
-					|| extension.id === 'ije.esm-vscode'
-					|| extension.id === 'johnsoncodehk.vscode-tsslint'
-					|| extension.id === 'VisualStudioExptTeam.vscodeintellicode'
-					|| extension.id === 'bierner.lit-html'
-				) {
-					continue;
-				}
-				else {
-					unknownExtensions.push(extension.id);
-				}
-			}
-		}
-		if (unknownExtensions.length) {
+		if (incompatibleExtensions.length || unknownExtensions.length) {
 			if (report) {
 				vscode.window.showInformationMessage(
-					`Hybrid Mode is disabled automatically because there is a potentially incompatible ${unknownExtensions.join(', ')} TypeScript plugin installed.`,
+					`Hybrid Mode is disabled automatically because there is a potentially incompatible ${[...incompatibleExtensions, ...unknownExtensions].join(', ')} TypeScript plugin installed.`,
 					'Open Settings',
-					'Report a false positive',
+					'Report a false positive'
 				).then(value => {
 					if (value === 'Open Settings') {
 						vscode.commands.executeCommand('workbench.action.openSettings', 'vue.server.hybridMode');
@@ -89,7 +114,7 @@ function getCurrentHybridModeStatus(report = false) {
 			}
 			return false;
 		}
-		const vscodeTsdkVersion = getVScodeTsdkVersion();
+		const vscodeTsdkVersion = getVSCodeTsdkVersion();
 		const workspaceTsdkVersion = getWorkspaceTsdkVersion();
 		if (
 			(vscodeTsdkVersion && !semver.gte(vscodeTsdkVersion, '5.3.0'))
@@ -112,15 +137,29 @@ function getCurrentHybridModeStatus(report = false) {
 		return true;
 	}
 	else {
+		if (config.server.hybridMode && incompatibleExtensions.length && report) {
+			vscode.window.showWarningMessage(
+				`You have explicitly enabled Hybrid Mode, but you have installed known incompatible extensions: ${incompatibleExtensions.join(', ')}. You may want to change vue.server.hybridMode to "auto" to avoid compatibility issues.`,
+				'Open Settings',
+				'Report a false positive'
+			).then(value => {
+				if (value === 'Open Settings') {
+					vscode.commands.executeCommand('workbench.action.openSettings', 'vue.server.hybridMode');
+				}
+				else if (value == 'Report a false positive') {
+					vscode.env.openExternal(vscode.Uri.parse('https://github.com/vuejs/language-tools/pull/4206'));
+				}
+			});
+		}
 		return config.server.hybridMode;
 	}
 
-	function getVScodeTsdkVersion() {
+	function getVSCodeTsdkVersion() {
 		const nightly = vscode.extensions.getExtension('ms-vscode.vscode-typescript-next');
 		if (nightly) {
 			const libPath = path.join(
 				nightly.extensionPath.replace(/\\/g, '/'),
-				'node_modules/typescript/lib',
+				'node_modules/typescript/lib'
 			);
 			return getTsVersion(libPath);
 		}
@@ -128,7 +167,7 @@ function getCurrentHybridModeStatus(report = false) {
 		if (vscode.env.appRoot) {
 			const libPath = path.join(
 				vscode.env.appRoot.replace(/\\/g, '/'),
-				'extensions/node_modules/typescript/lib',
+				'extensions/node_modules/typescript/lib'
 			);
 			return getTsVersion(libPath);
 		}
@@ -170,29 +209,21 @@ function getCurrentHybridModeStatus(report = false) {
 
 async function doActivate(context: vscode.ExtensionContext, createLc: CreateLanguageClient) {
 
+	vscode.commands.executeCommand('setContext', 'vue.activated', true);
+
 	getCurrentHybridModeStatus(true);
 
 	const outputChannel = vscode.window.createOutputChannel('Vue Language Server');
-
-	vscode.commands.executeCommand('setContext', 'vue.activated', true);
+	const selectors = config.server.includeLanguages;
 
 	client = createLc(
 		'vue',
 		'Vue',
-		getDocumentSelector(),
+		selectors,
 		await getInitializationOptions(context, enabledHybridMode),
 		6009,
 		outputChannel
 	);
-
-	const selectors: vscode.DocumentFilter[] = [{ language: 'vue' }];
-
-	if (config.server.petiteVue.supportHtmlFile) {
-		selectors.push({ language: 'html' });
-	}
-	if (config.server.vitePress.supportMdFile) {
-		selectors.push({ language: 'markdown' });
-	}
 
 	activateConfigWatcher();
 	activateRestartRequest();
@@ -204,11 +235,10 @@ async function doActivate(context: vscode.ExtensionContext, createLc: CreateLang
 	lsp.activateAutoInsertion(selectors, client);
 	lsp.activateDocumentDropEdit(selectors, client);
 	lsp.activateWriteVirtualFiles('vue.action.writeVirtualFiles', client);
-	lsp.activateServerSys(client);
 
 	if (!enabledHybridMode) {
 		lsp.activateTsConfigStatusItem(selectors, 'vue.tsconfig', client);
-		lsp.activateTsVersionStatusItem(selectors, 'vue.tsversion', context, client, text => 'TS ' + text);
+		lsp.activateTsVersionStatusItem(selectors, 'vue.tsversion', context, text => 'TS ' + text);
 		lsp.activateFindFileReferences('vue.findAllFileReferences', client);
 	}
 
@@ -225,25 +255,135 @@ async function doActivate(context: vscode.ExtensionContext, createLc: CreateLang
 	}
 
 	const item = vscode.languages.createLanguageStatusItem('vue-insider', 'vue');
-	if (!context.extension.packageJSON.version.includes('-insider')) {
-		item.text = '✨ Get Vue - Official Insiders';
-		item.severity = vscode.LanguageStatusSeverity.Warning;
-		item.command = {
-			title: 'More Info',
-			command: 'vscode.open',
-			arguments: ['https://github.com/vuejs/language-tools/wiki/Get-Insiders-Edition'],
-		};
+	item.text = 'Checking for Updates...';
+	item.busy = true;
+	let succeed = false;
+	for (const url of [
+		'https://raw.githubusercontent.com/vuejs/language-tools/HEAD/insiders.json',
+		'https://cdn.jsdelivr.net/gh/vuejs/language-tools/insiders.json',
+	]) {
+		try {
+			const res = await fetch(url);
+			onJson(await res.json() as any);
+			succeed = true;
+			break;
+		} catch { }
 	}
-	else {
-		item.text = '🚀 Vue - Official Insiders';
-		item.detail = 'Installed';
+	item.busy = false;
+	if (!succeed) {
+		item.text = 'Failed to Fetch Versions';
+		item.severity = vscode.LanguageStatusSeverity.Error;
+	}
+
+	function onJson(json: {
+		latest: string;
+		versions: {
+			version: string;
+			date: string;
+			downloads: {
+				GitHub: string;
+				AFDIAN: string;
+			};
+		}[];
+	}) {
+		item.detail = undefined;
 		item.command = {
-			title: 'Changelog',
-			command: 'vue-insiders.checkUpdate',
+			title: 'Select Version',
+			command: 'vue-insiders.update',
 		};
-		vscode.commands.registerCommand('vue-insiders.checkUpdate', () => {
-			const updateUrl = 'https://github.com/vuejs/language-tools/blob/master/CHANGELOG.md';
-			vscode.env.openExternal(vscode.Uri.parse(updateUrl));
+		if (json.versions.some(version => version.version === context.extension.packageJSON.version)) {
+			item.text = '🚀 Insiders Edition';
+			item.severity = vscode.LanguageStatusSeverity.Information;
+
+			if (context.extension.packageJSON.version !== json.latest) {
+				item.detail = 'New Version Available!';
+				item.severity = vscode.LanguageStatusSeverity.Warning;
+				vscode.window
+					.showInformationMessage('New Insiders Version Available!', 'Download')
+					.then(download => {
+						if (download) {
+							vscode.commands.executeCommand('vue-insiders.update');
+						}
+					});
+			}
+		}
+		else {
+			item.text = '✨ Get Insiders Edition';
+			item.severity = vscode.LanguageStatusSeverity.Warning;
+		}
+		vscode.commands.registerCommand('vue-insiders.update', async () => {
+			const quickPickItems: { [version: string]: vscode.QuickPickItem; } = {};
+			for (const { version, date } of json.versions) {
+				let description = date;
+				if (context.extension.packageJSON.version === version) {
+					description += ' (current)';
+				}
+				quickPickItems[version] = {
+					label: version,
+					description,
+				};
+			}
+			const version = await quickPick([quickPickItems, {
+				learnMore: {
+					label: 'Learn more about Insiders Edition',
+				},
+				joinViaGitHub: {
+					label: 'Join via GitHub Sponsors',
+				},
+				joinViaAFDIAN: {
+					label: 'Join via AFDIAN (爱发电)',
+				},
+			}]);
+			if (version === 'learnMore') {
+				vscode.env.openExternal(vscode.Uri.parse('https://github.com/vuejs/language-tools/wiki/Get-Insiders-Edition'));
+			}
+			else if (version === 'joinViaGitHub') {
+				vscode.env.openExternal(vscode.Uri.parse('https://github.com/sponsors/johnsoncodehk'));
+			}
+			else if (version === 'joinViaAFDIAN') {
+				vscode.env.openExternal(vscode.Uri.parse('https://afdian.net/a/johnsoncodehk'));
+			}
+			else {
+				const downloads = json.versions.find(v => v.version === version)?.downloads;
+				if (downloads) {
+					const quickPickItems: { [key: string]: vscode.QuickPickItem; } = {
+						GitHub: {
+							label: `${version} - GitHub Releases`,
+							description: 'Access via GitHub Sponsors',
+							detail: downloads.GitHub,
+						},
+						AFDIAN: {
+							label: `${version} - Insiders 电圈`,
+							description: 'Access via AFDIAN (爱发电)',
+							detail: downloads.AFDIAN,
+						},
+					};
+					const otherItems: { [key: string]: vscode.QuickPickItem; } = {
+						learnMore: {
+							label: 'Learn more about Insiders Edition',
+						},
+						joinViaGitHub: {
+							label: 'Join via GitHub Sponsors',
+						},
+						joinViaAFDIAN: {
+							label: 'Join via AFDIAN (爱发电)',
+						},
+					};
+					const option = await quickPick([quickPickItems, otherItems]);
+					if (option === 'learnMore') {
+						vscode.env.openExternal(vscode.Uri.parse('https://github.com/vuejs/language-tools/wiki/Get-Insiders-Edition'));
+					}
+					else if (option === 'joinViaGitHub') {
+						vscode.env.openExternal(vscode.Uri.parse('https://github.com/sponsors/johnsoncodehk'));
+					}
+					else if (option === 'joinViaAFDIAN') {
+						vscode.env.openExternal(vscode.Uri.parse('https://afdian.net/a/johnsoncodehk'));
+					}
+					else if (option) {
+						vscode.env.openExternal(vscode.Uri.parse(downloads[option as keyof typeof downloads]));
+					}
+				}
+			}
 		});
 	}
 
@@ -275,6 +415,16 @@ async function doActivate(context: vscode.ExtensionContext, createLc: CreateLang
 					);
 				}
 			}
+			else if (e.affectsConfiguration('vue.server')) {
+				if (enabledHybridMode) {
+					if (e.affectsConfiguration('vue.server.includeLanguages')) {
+						requestReloadVscode('Please reload VSCode to apply the new language settings.');
+					}
+				}
+				else {
+					vscode.commands.executeCommand('vue.action.restartServer', false);
+				}
+			}
 			else if (e.affectsConfiguration('vue')) {
 				vscode.commands.executeCommand('vue.action.restartServer', false);
 			}
@@ -299,38 +449,12 @@ export function deactivate(): Thenable<any> | undefined {
 	return client?.stop();
 }
 
-export function getDocumentSelector(): lsp.DocumentFilter[] {
-	const selectors: lsp.DocumentFilter[] = [];
-	selectors.push({ language: 'vue' });
-	if (config.server.petiteVue.supportHtmlFile) {
-		selectors.push({ language: 'html' });
-	}
-	if (config.server.vitePress.supportMdFile) {
-		selectors.push({ language: 'markdown' });
-	}
-	return selectors;
-}
-
 async function getInitializationOptions(
 	context: vscode.ExtensionContext,
-	hybridMode: boolean,
+	hybridMode: boolean
 ): Promise<VueInitializationOptions> {
 	return {
-		// volar
-		diagnosticModel: config.server.diagnosticModel === 'pull' ? DiagnosticModel.Pull : DiagnosticModel.Push,
-		typescript: { tsdk: (await lsp.getTsdk(context)).tsdk },
-		maxFileSize: config.server.maxFileSize,
-		semanticTokensLegend: {
-			tokenTypes: [],
-			tokenModifiers: [],
-		},
-		vue: {
-			hybridMode,
-			additionalExtensions: [
-				...config.server.additionalExtensions,
-				...!config.server.petiteVue.supportHtmlFile ? [] : ['html'],
-				...!config.server.vitePress.supportMdFile ? [] : ['md'],
-			],
-		},
+		typescript: { tsdk: (await lsp.getTsdk(context))!.tsdk },
+		vue: { hybridMode },
 	};
-}
+};

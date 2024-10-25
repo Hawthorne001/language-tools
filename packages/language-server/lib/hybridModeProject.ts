@@ -1,126 +1,114 @@
-import type { LanguagePlugin, LanguageServicePlugin, ServerProject, ServerProjectProviderFactory } from '@volar/language-server';
-import { createSimpleServerProject } from '@volar/language-server/lib/project/simpleProject';
-import { createServiceEnvironment, getWorkspaceFolder } from '@volar/language-server/lib/project/simpleProjectProvider';
-import type { ServerContext } from '@volar/language-server/lib/server';
-import { FileMap, createLanguage } from '@vue/language-core';
-import { LanguageService, ServiceEnvironment, createLanguageService } from '@vue/language-service';
-import { searchNamedPipeServerForFile } from '@vue/typescript-plugin/lib/utils';
-import type * as ts from 'typescript';
+import type { Language, LanguagePlugin, LanguageServer, LanguageServerProject, ProjectContext, ProviderResult } from '@volar/language-server';
+import { createLanguageServiceEnvironment } from '@volar/language-server/lib/project/simpleProject';
+import { createLanguage } from '@vue/language-core';
+import { createLanguageService, createUriMap, LanguageService } from '@vue/language-service';
+import { getReadyNamedPipePaths, onSomePipeReadyCallbacks, searchNamedPipeServerForFile } from '@vue/typescript-plugin/lib/utils';
+import { URI } from 'vscode-uri';
 
-export function createHybridModeProjectProviderFactory(sys: ts.System): ServerProjectProviderFactory {
-	return (context, servicePlugins, getLanguagePlugins) => {
-		const serviceEnvs = new FileMap<ServiceEnvironment>(sys.useCaseSensitiveFileNames);
-		const tsconfigProjects = new FileMap<Promise<ServerProject>>(sys.useCaseSensitiveFileNames);
-		const simpleProjects = new FileMap<Promise<ServerProject>>(sys.useCaseSensitiveFileNames);
-		context.onDidChangeWatchedFiles(({ changes }) => {
-			for (const change of changes) {
-				if (tsconfigProjects.has(change.uri)) {
-					tsconfigProjects.get(change.uri)?.then(project => project.dispose());
-					tsconfigProjects.delete(change.uri);
-					context.reloadDiagnostics();
+export function createHybridModeProject(
+	create: (params: {
+		configFileName?: string;
+		asFileName: (scriptId: URI) => string;
+	}) => ProviderResult<{
+		languagePlugins: LanguagePlugin<URI>[];
+		setup?(options: {
+			language: Language;
+			project: ProjectContext;
+		}): void;
+	}>
+): LanguageServerProject {
+	let simpleLs: Promise<LanguageService> | undefined;
+	let server: LanguageServer;
+
+	const tsconfigProjects = createUriMap<Promise<LanguageService>>();
+	const project: LanguageServerProject = {
+		setup(_server) {
+			server = _server;
+			onSomePipeReadyCallbacks.push(() => {
+				server.languageFeatures.requestRefresh(false);
+			});
+			server.fileWatcher.onDidChangeWatchedFiles(({ changes }) => {
+				for (const change of changes) {
+					const changeUri = URI.parse(change.uri);
+					if (tsconfigProjects.has(changeUri)) {
+						tsconfigProjects.get(changeUri)?.then(project => project.dispose());
+						tsconfigProjects.delete(changeUri);
+					}
 				}
+			});
+			const end = Date.now() + 60000;
+			const pipeWatcher = setInterval(() => {
+				getReadyNamedPipePaths();
+				if (Date.now() > end) {
+					clearInterval(pipeWatcher);
+				}
+			}, 1000);
+		},
+		async getLanguageService(uri) {
+			const fileName = asFileName(uri);
+			const namedPipeServer = (await searchNamedPipeServerForFile(fileName));
+			namedPipeServer?.socket.end();
+			if (namedPipeServer?.projectInfo?.kind === 1) {
+				const tsconfig = namedPipeServer.projectInfo.name;
+				const tsconfigUri = URI.file(tsconfig);
+				if (!tsconfigProjects.has(tsconfigUri)) {
+					tsconfigProjects.set(tsconfigUri, createLs(server, tsconfig));
+				}
+				return await tsconfigProjects.get(tsconfigUri)!;
+			}
+			else {
+				simpleLs ??= createLs(server, undefined);
+				return await simpleLs;
+			}
+		},
+		getExistingLanguageServices() {
+			return Promise.all([
+				...tsconfigProjects.values(),
+				simpleLs,
+			].filter(promise => !!promise));
+		},
+		reload() {
+			for (const ls of [
+				...tsconfigProjects.values(),
+				simpleLs,
+			]) {
+				ls?.then(ls => ls.dispose());
+			}
+			tsconfigProjects.clear();
+			simpleLs = undefined;
+		},
+	};
+
+	return project;
+
+	function asFileName(uri: URI) {
+		return uri.fsPath.replace(/\\/g, '/');
+	}
+
+	async function createLs(server: LanguageServer, tsconfig: string | undefined) {
+		const { languagePlugins, setup } = await create({
+			configFileName: tsconfig,
+			asFileName,
+		});
+		const language = createLanguage([
+			{ getLanguageId: uri => server.documents.get(uri)?.languageId },
+			...languagePlugins,
+		], createUriMap(), uri => {
+			const document = server.documents.get(uri);
+			if (document) {
+				language.scripts.set(uri, document.getSnapshot(), document.languageId);
+			}
+			else {
+				language.scripts.delete(uri);
 			}
 		});
-		return {
-			async getProject(uri): Promise<ServerProject> {
-				const workspaceFolder = getWorkspaceFolder(uri, context.workspaceFolders);
-				let serviceEnv = serviceEnvs.get(workspaceFolder);
-				if (!serviceEnv) {
-					serviceEnv = createServiceEnvironment(context, workspaceFolder);
-					serviceEnvs.set(workspaceFolder, serviceEnv);
-				}
-				const fileName = serviceEnv.typescript!.uriToFileName(uri);
-				const projectInfo = (await searchNamedPipeServerForFile(fileName))?.projectInfo;
-				if (projectInfo?.kind === 1) {
-					const tsconfig = projectInfo.name;
-					const tsconfigUri = serviceEnv.typescript!.fileNameToUri(tsconfig);
-					if (!tsconfigProjects.has(tsconfigUri)) {
-						tsconfigProjects.set(tsconfigUri, (async () => {
-							const languagePlugins = await getLanguagePlugins(serviceEnv, {
-								typescript: {
-									configFileName: tsconfig,
-									host: {
-										getScriptFileNames() {
-											return [];
-										},
-									} as any,
-									sys: {
-										...sys,
-										version: 0,
-										async sync() {
-											return 0;
-										},
-										dispose() { },
-									},
-								},
-							});
-							return createTSConfigProject(context, serviceEnv, languagePlugins, servicePlugins);
-						})());
-					}
-					return await tsconfigProjects.get(tsconfigUri)!;
-				}
-				else {
-					if (!simpleProjects.has(workspaceFolder)) {
-						simpleProjects.set(workspaceFolder, (() => {
-							return createSimpleServerProject(context, serviceEnv, servicePlugins, getLanguagePlugins);
-						})());
-					}
-					return await simpleProjects.get(workspaceFolder)!;
-				}
-			},
-			async getProjects() {
-				return Promise.all([
-					...tsconfigProjects.values(),
-					...simpleProjects.values(),
-				]);
-			},
-			async reloadProjects() {
-				for (const project of [
-					...tsconfigProjects.values(),
-					...simpleProjects.values(),
-				]) {
-					(await project).dispose();
-				}
-				tsconfigProjects.clear();
-			},
-		};
-
-		function createTSConfigProject(
-			context: ServerContext,
-			serviceEnv: ServiceEnvironment,
-			languagePlugins: LanguagePlugin[],
-			servicePlugins: LanguageServicePlugin[],
-		): ServerProject {
-
-			let languageService: LanguageService | undefined;
-
-			return {
-				getLanguageService,
-				getLanguageServiceDontCreate: () => languageService,
-				dispose() {
-					languageService?.dispose();
-				},
-			};
-
-			function getLanguageService() {
-				if (!languageService) {
-					const language = createLanguage(languagePlugins, false, uri => {
-						const script = context.documents.get(uri);
-						if (script) {
-							language.scripts.set(uri, script.languageId, script.getSnapshot());
-						}
-						else {
-							language.scripts.delete(uri);
-						}
-					});
-					languageService = createLanguageService(
-						language,
-						servicePlugins,
-						serviceEnv,
-					);
-				}
-				return languageService;
-			}
-		}
-	};
+		const project: ProjectContext = {};
+		setup?.({ language, project });
+		return createLanguageService(
+			language,
+			server.languageServicePlugins,
+			createLanguageServiceEnvironment(server, [...server.workspaceFolders.all]),
+			project
+		);
+	}
 }

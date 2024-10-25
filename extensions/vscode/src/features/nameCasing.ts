@@ -1,7 +1,7 @@
-import * as vscode from 'vscode';
+import { BaseLanguageClient, ExecuteCommandParams, ExecuteCommandRequest, State, TextEdit } from '@volar/vscode';
 import { quickPick } from '@volar/vscode/lib/common';
-import { BaseLanguageClient, State } from '@volar/vscode';
-import { AttrNameCasing, TagNameCasing, DetectNameCasingRequest, GetConvertAttrCasingEditsRequest, GetConvertTagCasingEditsRequest } from '@vue/language-server';
+import { AttrNameCasing, TagNameCasing, commands } from '@vue/language-server/lib/types';
+import * as vscode from 'vscode';
 import { config } from '../config';
 
 export const attrNameCasings = new Map<string, AttrNameCasing>();
@@ -97,10 +97,13 @@ export async function activate(_context: vscode.ExtensionContext, client: BaseLa
 
 	async function convertTag(editor: vscode.TextEditor, casing: TagNameCasing) {
 
-		const response = await client.sendRequest(GetConvertTagCasingEditsRequest.type, {
-			textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
-			casing,
-		});
+		const response: TextEdit[] = await client.sendRequest(ExecuteCommandRequest.type, {
+			command: casing === TagNameCasing.Kebab
+				? commands.convertTagsToKebabCase
+				: commands.convertTagsToPascalCase,
+			arguments: [client.code2ProtocolConverter.asUri(editor.document.uri)],
+		} satisfies ExecuteCommandParams);
+
 		const edits = await client.protocol2CodeConverter.asTextEdits(response);
 
 		if (edits) {
@@ -117,10 +120,13 @@ export async function activate(_context: vscode.ExtensionContext, client: BaseLa
 
 	async function convertAttr(editor: vscode.TextEditor, casing: AttrNameCasing) {
 
-		const response = await client.sendRequest(GetConvertAttrCasingEditsRequest.type, {
-			textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
-			casing,
-		});
+		const response: TextEdit[] = await client.sendRequest(ExecuteCommandRequest.type, {
+			command: casing === AttrNameCasing.Kebab
+				? commands.convertPropsToKebabCase
+				: commands.convertPropsToCamelCase,
+			arguments: [client.code2ProtocolConverter.asUri(editor.document.uri)],
+		} satisfies ExecuteCommandParams);
+
 		const edits = await client.protocol2CodeConverter.asTextEdits(response);
 
 		if (edits) {
@@ -136,11 +142,7 @@ export async function activate(_context: vscode.ExtensionContext, client: BaseLa
 	}
 
 	async function update(document: vscode.TextDocument | undefined) {
-		if (
-			document?.languageId === 'vue'
-			|| (config.server.vitePress.supportMdFile && document?.languageId === 'markdown')
-			|| (config.server.petiteVue.supportHtmlFile && document?.languageId === 'html')
-		) {
+		if (document && vscode.languages.match(selector, document)) {
 			let detected: Awaited<ReturnType<typeof detect>> | undefined;
 			let attrNameCasing = attrNameCasings.get(document.uri.toString());
 			let tagNameCasing = tagNameCasings.get(document.uri.toString());
@@ -192,8 +194,14 @@ export async function activate(_context: vscode.ExtensionContext, client: BaseLa
 		}
 	}
 
-	function detect(document: vscode.TextDocument) {
-		return client.sendRequest(DetectNameCasingRequest.type, { textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document) });
+	function detect(document: vscode.TextDocument): Promise<{
+		tag: TagNameCasing[],
+		attr: AttrNameCasing[],
+	}> {
+		return client.sendRequest(ExecuteCommandRequest.type, {
+			command: commands.detectNameCasing,
+			arguments: [client.code2ProtocolConverter.asUri(document.uri)],
+		} satisfies ExecuteCommandParams);
 	}
 
 	function updateStatusBarText() {
